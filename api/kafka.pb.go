@@ -75,7 +75,9 @@ func (x *Record) GetOffset() int64 {
 
 type ProduceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Value         []byte                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Partition     uint32                 `protobuf:"varint,2,opt,name=partition,proto3" json:"partition,omitempty"`
+	Value         []byte                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -110,6 +112,20 @@ func (*ProduceRequest) Descriptor() ([]byte, []int) {
 	return file_api_kafka_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *ProduceRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ProduceRequest) GetPartition() uint32 {
+	if x != nil {
+		return x.Partition
+	}
+	return 0
+}
+
 func (x *ProduceRequest) GetValue() []byte {
 	if x != nil {
 		return x.Value
@@ -119,7 +135,9 @@ func (x *ProduceRequest) GetValue() []byte {
 
 type ProduceResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Partition     uint32                 `protobuf:"varint,2,opt,name=partition,proto3" json:"partition,omitempty"`
+	Offset        int64                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -154,6 +172,20 @@ func (*ProduceResponse) Descriptor() ([]byte, []int) {
 	return file_api_kafka_proto_rawDescGZIP(), []int{2}
 }
 
+func (x *ProduceResponse) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ProduceResponse) GetPartition() uint32 {
+	if x != nil {
+		return x.Partition
+	}
+	return 0
+}
+
 func (x *ProduceResponse) GetOffset() int64 {
 	if x != nil {
 		return x.Offset
@@ -163,7 +195,9 @@ func (x *ProduceResponse) GetOffset() int64 {
 
 type ConsumeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Partition     uint32                 `protobuf:"varint,2,opt,name=partition,proto3" json:"partition,omitempty"`
+	Offset        int64                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -196,6 +230,20 @@ func (x *ConsumeRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ConsumeRequest.ProtoReflect.Descriptor instead.
 func (*ConsumeRequest) Descriptor() ([]byte, []int) {
 	return file_api_kafka_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ConsumeRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ConsumeRequest) GetPartition() uint32 {
+	if x != nil {
+		return x.Partition
+	}
+	return 0
 }
 
 func (x *ConsumeRequest) GetOffset() int64 {
@@ -256,13 +304,19 @@ const file_api_kafka_proto_rawDesc = "" +
 	"\x0fapi/kafka.proto\x12\x03api\"6\n" +
 	"\x06Record\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\fR\x05value\x12\x16\n" +
-	"\x06offset\x18\x02 \x01(\x03R\x06offset\"&\n" +
+	"\x06offset\x18\x02 \x01(\x03R\x06offset\"Z\n" +
 	"\x0eProduceRequest\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\fR\x05value\")\n" +
-	"\x0fProduceResponse\x12\x16\n" +
-	"\x06offset\x18\x01 \x01(\x03R\x06offset\"(\n" +
-	"\x0eConsumeRequest\x12\x16\n" +
-	"\x06offset\x18\x01 \x01(\x03R\x06offset\"6\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1c\n" +
+	"\tpartition\x18\x02 \x01(\rR\tpartition\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\fR\x05value\"]\n" +
+	"\x0fProduceResponse\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1c\n" +
+	"\tpartition\x18\x02 \x01(\rR\tpartition\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x03R\x06offset\"\\\n" +
+	"\x0eConsumeRequest\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1c\n" +
+	"\tpartition\x18\x02 \x01(\rR\tpartition\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x03R\x06offset\"6\n" +
 	"\x0fConsumeResponse\x12#\n" +
 	"\x06record\x18\x01 \x01(\v2\v.api.RecordR\x06record2s\n" +
 	"\x05Kafka\x124\n" +

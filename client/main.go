@@ -39,30 +39,53 @@ func main() {
 	command := os.Args[1]
 	switch command {
 	case "produce":
-		if len(os.Args) != 3 {
+		if len(os.Args) != 5 {
 			printUsage()
-			log.Fatal("produce command requires a message")
+			log.Fatal("produce command requires topic, partition and message")
 		}
 
-		message := os.Args[2]
-		resp, err := client.Produce(ctx, &api.ProduceRequest{Value: []byte(message)})
+		topic := os.Args[2]
+		partition, err := strconv.ParseUint(os.Args[3], 10, 32)
+		if err != nil {
+			log.Fatalf("invalid partition: %v", err)
+		}
+		message := os.Args[4]
+
+		req := &api.ProduceRequest{
+			Topic:     topic,
+			Partition: uint32(partition),
+			Value:     []byte(message),
+		}
+
+		resp, err := client.Produce(ctx, req)
 		if err != nil {
 			log.Fatalf("could not produce: %v", err)
 		}
 		log.Printf("message produced to offset: %d", resp.Offset)
 
 	case "consume":
-		if len(os.Args) != 3 {
+		if len(os.Args) != 5 {
 			printUsage()
-			log.Fatal("consume command requires an offset")
+			log.Fatal("consume command requires topic, partition and offset")
 		}
 
-		offset, err := strconv.ParseInt(os.Args[2], 10, 64)
+		topic := os.Args[2]
+		partition, err := strconv.ParseUint(os.Args[3], 10, 32)
+		if err != nil {
+			log.Fatalf("invalid partition: %v", err)
+		}
+		offset, err := strconv.ParseInt(os.Args[4], 10, 64)
 		if err != nil {
 			log.Fatalf("invalid offset: %v", err)
 		}
 
-		resp, err := client.Consume(ctx, &api.ConsumeRequest{Offset: offset})
+		req := &api.ConsumeRequest{
+			Topic:     topic,
+			Partition: uint32(partition),
+			Offset:    offset,
+		}
+
+		resp, err := client.Consume(ctx, req)
 		if err != nil {
 			log.Fatalf("could not consume: %v", err)
 		}

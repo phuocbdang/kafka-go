@@ -15,15 +15,21 @@ message Record {
 }
 
 message ProduceRequest {
-  bytes value = 1;
+  string topic = 1;
+  uint32 partition = 2;
+  bytes value = 3;
 }
 
 message ProduceResponse {
-  int64 offset = 1;
+  string topic = 1;
+  uint32 partition = 2;
+  int64 offset = 3;
 }
 
 message ConsumeRequest {
-  int64 offset = 1;
+  string topic = 1;
+  uint32 partition = 2;
+  int64 offset = 3;
 }
 
 message ConsumeResponse {
