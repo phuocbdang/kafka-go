@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"kafka-go/api"
@@ -19,16 +20,62 @@ import (
 type server struct {
 	api.UnimplementedKafkaServer
 	dataDir string
-	mu      sync.RWMutex
-	logs    map[string]*storage.CommitLog
+
+	// Manage commit logs
+	logMu sync.RWMutex
+	logs  map[string]*storage.CommitLog
+
+	// Manage consumer group offsets
+	offsetMu   sync.RWMutex
+	offsets    map[string]int64 // Key: <group_id>-<topic>-<partition>, Value: offset
+	offsetPath string           // Path to the durable offsets file
 }
 
 // newServer creates a new gRPC server instance.
 func newServer(dataDir string) (*server, error) {
-	return &server{
-		dataDir: dataDir,
-		logs:    make(map[string]*storage.CommitLog),
-	}, nil
+	srv := &server{
+		dataDir:    dataDir,
+		logs:       make(map[string]*storage.CommitLog),
+		offsets:    make(map[string]int64),
+		offsetPath: filepath.Join(dataDir, "offsets.json"),
+	}
+
+	// Load offsets from the durable file on startup
+	if err := srv.loadOffsets(); err != nil {
+		return nil, fmt.Errorf("failed to load offsets: %w", err)
+	}
+
+	return srv, nil
+}
+
+// loadOffsets reads the offsets file from disks into the in-memory map
+func (s *server) loadOffsets() error {
+	data, err := os.ReadFile(s.offsetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Println("offsets.json not found, starting with empty offsets.")
+			return nil
+		}
+		return err
+	}
+
+	s.offsetMu.Lock()
+	defer s.offsetMu.Unlock()
+
+	return json.Unmarshal(data, &s.offsets)
+}
+
+// persistOffsets writes the current in-memory offset map to the Json file
+func (s *server) persistOffsets() error {
+	s.offsetMu.Lock()
+	defer s.offsetMu.Unlock()
+
+	data, err := json.Marshal(s.offsets)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.offsetPath, data, 0644)
 }
 
 // getOrCreateLog retrieves the commit log for a given topic and partition,
@@ -37,16 +84,16 @@ func (s *server) getOrCreateLog(topic string, partition uint32) (*storage.Commit
 	logIdentifier := fmt.Sprintf("%s-%d", topic, partition)
 
 	// Check a read lock for performance
-	s.mu.RLock()
+	s.logMu.RLock()
 	commitLog, ok := s.logs[logIdentifier]
-	s.mu.RUnlock()
+	s.logMu.RUnlock()
 	if ok {
 		return commitLog, nil
 	}
 
 	// If commit log not found, acquire a write log to create
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
 
 	// Double-Checked Locking (DCL): Prevents race conditions by ensuring
 	// only one 'CommitLog' is created per topic/partition, even if
@@ -95,8 +142,8 @@ func (s *server) Produce(ctx context.Context, req *api.ProduceRequest) (*api.Pro
 // getLog retrieves the commit log for a given topic and partition,
 // returns an error if the log does not exist.
 func (s *server) getLog(topic string, partition uint32) (*storage.CommitLog, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
 
 	logIdentifier := fmt.Sprintf("%s-%d", topic, partition)
 	commitLog, ok := s.logs[logIdentifier]
@@ -125,6 +172,36 @@ func (s *server) Consume(ctx context.Context, req *api.ConsumeRequest) (*api.Con
 			Offset: nextOffset,
 		},
 	}, nil
+}
+
+// CommitOffset handles a request from a consumer to save its progress.
+func (s *server) CommitOffset(ctx context.Context, req *api.CommitOffsetRequest) (*api.CommitOffsetResponse, error) {
+	offsetIdentifier := fmt.Sprintf("%s-%s-%d", req.ConsumerGroupId, req.Topic, req.Partition)
+	s.offsetMu.Lock()
+	s.offsets[offsetIdentifier] = req.Offset
+	s.offsetMu.Unlock()
+
+	if err := s.persistOffsets(); err != nil {
+		log.Printf("ERROR: failed to persist offsets: %v", err)
+		return nil, fmt.Errorf("failed to commit offset")
+	}
+
+	return &api.CommitOffsetResponse{}, nil
+}
+
+// FetchOffset handles a request from a consumer to retrieve its last saved progress.
+func (s *server) FetchOffset(ctx context.Context, req *api.FetchOffsetRequest) (*api.FetchOffsetResponse, error) {
+	offsetIdentifier := fmt.Sprintf("%s-%s-%d", req.ConsumerGroupId, req.Topic, req.Partition)
+	s.offsetMu.RLock()
+	defer s.offsetMu.RUnlock()
+
+	offset, ok := s.offsets[offsetIdentifier]
+	if !ok {
+		// If no offset is stored for this group, they start at the beginning.
+		return &api.FetchOffsetResponse{Offset: 0}, nil
+	}
+
+	return &api.FetchOffsetResponse{Offset: offset}, nil
 }
 
 func main() {
