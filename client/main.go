@@ -19,7 +19,7 @@ func printUsage() {
 	fmt.Println("  client consume <group_id> <topic> <partition>")
 }
 
-func handleProduce(ctx context.Context, client api.KafkaClient) {
+func handleProduce(initialBrokerAddr string) {
 	if len(os.Args) != 5 {
 		printUsage()
 		log.Fatal("produce command requires topic, partition and message")
@@ -32,24 +32,63 @@ func handleProduce(ctx context.Context, client api.KafkaClient) {
 	}
 	message := os.Args[4]
 
-	req := &api.ProduceRequest{
-		Topic:     topic,
-		Partition: uint32(partition),
-		Value:     []byte(message),
+	currentBrokerAddr := initialBrokerAddr
+
+	for i := 0; i < 5; i++ {
+		log.Printf("attempting to produce to broker at %s", currentBrokerAddr)
+		conn, err := grpc.NewClient(currentBrokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("did not connect: %v", err)
+		}
+		defer conn.Close()
+
+		client := api.NewKafkaClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		req := &api.ProduceRequest{
+			Topic:     topic,
+			Partition: uint32(partition),
+			Value:     []byte(message),
+		}
+
+		resp, err := client.Produce(ctx, req)
+		if err != nil {
+			log.Fatalf("could not produce: %v", err)
+		}
+
+		if resp.ErrorCode == api.ErrorCode_NONE {
+			log.Printf("message produced successfully (offset from leader is approximate)")
+			return
+		}
+
+		if resp.ErrorCode == api.ErrorCode_NOT_LEADER {
+			log.Printf("not the leader, leader is at %s. retrying ...", resp.LeaderAddr)
+			currentBrokerAddr = resp.LeaderAddr
+			time.Sleep(1 * time.Second)
+			continue
+		}
 	}
 
-	resp, err := client.Produce(ctx, req)
-	if err != nil {
-		log.Fatalf("could not produce: %v", err)
-	}
-	log.Printf("message produced to offset: %d", resp.Offset)
+	log.Fatal("failed to produce message after multiple retries")
 }
 
-func handleConsume(ctx context.Context, client api.KafkaClient) {
+func handleConsume(brokerAddr string) {
 	if len(os.Args) != 5 {
 		printUsage()
 		log.Fatal("consume command requires group_id, topic, partition")
 	}
+
+	// Consume logic does not need leader redirection for this implementation
+	// as any node can serve reads.
+	conn, err := grpc.NewClient(brokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("did not connect: %v", err)
+	}
+	defer conn.Close()
+	client := api.NewKafkaClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	groupId := os.Args[2]
 	topic := os.Args[3]
@@ -101,22 +140,13 @@ func main() {
 	}
 
 	brokerAddr := "localhost:9092"
-	conn, err := grpc.NewClient(brokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	client := api.NewKafkaClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 
 	command := os.Args[1]
 	switch command {
 	case "produce":
-		handleProduce(ctx, client)
+		handleProduce(brokerAddr)
 	case "consume":
-		handleConsume(ctx, client)
+		handleConsume(brokerAddr)
 	default:
 		log.Fatalf("unknown command: %s", command)
 	}
