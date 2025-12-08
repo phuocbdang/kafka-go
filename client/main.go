@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"kafka-go/api"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -14,23 +16,22 @@ import (
 )
 
 func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  client produce <topic> <partition> <message>")
-	fmt.Println("  client consume <group_id> <topic> <partition>")
+	fmt.Println("Usage: client <command> [args]")
+	fmt.Println("Commands:")
+	fmt.Println("	produce [--args=<level>] <broker_addr> <topic> <partition> <value>")
+	fmt.Println("	consume <broker_addr> <group_id> <topic> <partition>")
 }
 
-func handleProduce(initialBrokerAddr string) {
-	if len(os.Args) != 5 {
-		printUsage()
-		log.Fatal("produce command requires topic, partition and message")
+func handleProduce(initialBrokerAddr string, topic string, partition uint32, value string, acks string) {
+	var ackLevel api.AckLevel
+	switch strings.ToLower(acks) {
+	case "none":
+		ackLevel = api.AckLevel_NONE
+	case "all":
+		ackLevel = api.AckLevel_ALL
+	default:
+		log.Fatalf("invalid acks level (none, all): %s", acks)
 	}
-
-	topic := os.Args[2]
-	partition, err := strconv.ParseUint(os.Args[3], 10, 32)
-	if err != nil {
-		log.Fatalf("invalid partition: %v", err)
-	}
-	message := os.Args[4]
 
 	currentBrokerAddr := initialBrokerAddr
 
@@ -49,17 +50,15 @@ func handleProduce(initialBrokerAddr string) {
 		req := &api.ProduceRequest{
 			Topic:     topic,
 			Partition: uint32(partition),
-			Value:     []byte(message),
+			Value:     []byte(value),
+			Ack:       ackLevel,
 		}
 
 		resp, err := client.Produce(ctx, req)
 		if err != nil {
 			log.Fatalf("could not produce: %v", err)
-		}
-
-		if resp.ErrorCode == api.ErrorCode_NONE {
-			log.Printf("message produced successfully (offset from leader is approximate)")
-			return
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		if resp.ErrorCode == api.ErrorCode_NOT_LEADER {
@@ -68,17 +67,19 @@ func handleProduce(initialBrokerAddr string) {
 			time.Sleep(1 * time.Second)
 			continue
 		}
+
+		if ackLevel == api.AckLevel_ALL {
+			log.Printf("message produced successfully to offset: %d", resp.Offset)
+		} else {
+			log.Printf("message sent successfully (fire-and-forget)")
+		}
+		return
 	}
 
 	log.Fatal("failed to produce message after multiple retries")
 }
 
-func handleConsume(brokerAddr string) {
-	if len(os.Args) != 5 {
-		printUsage()
-		log.Fatal("consume command requires group_id, topic, partition")
-	}
-
+func handleConsume(brokerAddr string, groupID string, topic string, partition uint32) {
 	// Consume logic does not need leader redirection for this implementation
 	// as any node can serve reads.
 	conn, err := grpc.NewClient(brokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -90,30 +91,21 @@ func handleConsume(brokerAddr string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	groupId := os.Args[2]
-	topic := os.Args[3]
-	partition, err := strconv.ParseUint(os.Args[4], 10, 32)
-	if err != nil {
-		log.Fatalf("invalid partition: %v", err)
-	}
-
 	//  Fetch the last committed offset for this consumer group
 	fetchResp, err := client.FetchOffset(ctx, &api.FetchOffsetRequest{
-		ConsumerGroupId: groupId,
+		ConsumerGroupId: groupID,
 		Topic:           topic,
-		Partition:       uint32(partition),
+		Partition:       partition,
 	})
 	if err != nil {
 		log.Fatalf("could not fetch offset: %v", err)
 	}
 
-	currentOffset := fetchResp.Offset
-
 	// Consume message
 	consumeResp, err := client.Consume(ctx, &api.ConsumeRequest{
 		Topic:     topic,
 		Partition: uint32(partition),
-		Offset:    currentOffset,
+		Offset:    fetchResp.Offset,
 	})
 	if err != nil {
 		log.Fatalf("could not consume: %v", err)
@@ -123,7 +115,7 @@ func handleConsume(brokerAddr string) {
 
 	// Commit offset
 	_, err = client.CommitOffset(ctx, &api.CommitOffsetRequest{
-		ConsumerGroupId: groupId,
+		ConsumerGroupId: groupID,
 		Topic:           topic,
 		Partition:       uint32(partition),
 		Offset:          consumeResp.Record.Offset,
@@ -136,18 +128,48 @@ func handleConsume(brokerAddr string) {
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(1)
+		return
 	}
 
-	brokerAddr := "localhost:9092"
+	produceCmd := flag.NewFlagSet("produce", flag.ExitOnError)
+	produceAcks := produceCmd.String("acks", "all", "Acknowledgment level (none, all)")
 
-	command := os.Args[1]
-	switch command {
+	consumeCmd := flag.NewFlagSet("consume", flag.ExitOnError)
+
+	switch os.Args[1] {
 	case "produce":
-		handleProduce(brokerAddr)
+		if err := produceCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("error parsing produce command: %v", err)
+		}
+		if produceCmd.NArg() != 4 {
+			fmt.Println("Usage: client produce [--acks=<level>] <broker_addr> <topic> <partition> <value>")
+			return
+		}
+		brokerAddr := produceCmd.Arg(0)
+		topic := produceCmd.Arg(1)
+		partition, err := strconv.ParseUint(produceCmd.Arg(2), 10, 32)
+		if err != nil {
+			log.Fatalf("invalid partition: %v", err)
+		}
+		value := produceCmd.Arg(3)
+		handleProduce(brokerAddr, topic, uint32(partition), value, *produceAcks)
 	case "consume":
-		handleConsume(brokerAddr)
+		if err := consumeCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("error parsing consume command: %v", err)
+		}
+		if consumeCmd.NArg() != 4 {
+			fmt.Println("Usage: client consume <broker_addr> <group_id> <topic> <partition>")
+			return
+		}
+		brokerAddr := consumeCmd.Arg(0)
+		groupID := consumeCmd.Arg(1)
+		topic := consumeCmd.Arg(2)
+		partition, err := strconv.ParseUint(consumeCmd.Arg(3), 10, 32)
+		if err != nil {
+			log.Fatalf("invalid partition: %v", err)
+		}
+		handleConsume(brokerAddr, groupID, topic, uint32(partition))
 	default:
-		log.Fatalf("unknown command: %s", command)
+		printUsage()
 	}
 }

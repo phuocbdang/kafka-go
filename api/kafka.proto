@@ -12,8 +12,13 @@ service Kafka {
 }
 
 enum ErrorCode {
-  NONE = 0;
+  OK = 0;
   NOT_LEADER = 1;
+}
+
+enum AckLevel {
+    NONE = 0; // Fire-and-forget, no response needed
+    ALL = 1; // Wait for a quorum of nodes to commit the message
 }
 
 message Record {
@@ -25,6 +30,7 @@ message ProduceRequest {
   string topic = 1;
   uint32 partition = 2;
   bytes value = 3;
+  AckLevel ack = 4; // The requested acknowledgment level
 }
 
 message ProduceResponse {

@@ -184,6 +184,13 @@ func (s *server) Produce(ctx context.Context, req *api.ProduceRequest) (*api.Pro
 		return nil, fmt.Errorf("failed to apply raft command: %w", err)
 	}
 
+	if req.Ack == api.AckLevel_NONE {
+		// File-and-forget. Return immediately without waiting for Raft to commit.
+		return &api.ProduceResponse{
+			ErrorCode: api.ErrorCode_OK,
+		}, nil
+	}
+
 	response, ok := applyFuture.Response().(cluster.ApplyResponse)
 	if !ok {
 		return nil, fmt.Errorf("unexpected fsm response type")
@@ -191,7 +198,7 @@ func (s *server) Produce(ctx context.Context, req *api.ProduceRequest) (*api.Pro
 
 	return &api.ProduceResponse{
 		Offset:    response.Offset,
-		ErrorCode: api.ErrorCode_NONE,
+		ErrorCode: api.ErrorCode_OK,
 	}, nil
 }
 
