@@ -22,7 +22,7 @@ func printUsage() {
 	fmt.Println("	consume <broker_addr> <group_id> <topic> <partition>")
 }
 
-func handleProduce(initialBrokerAddr string, topic string, partition uint32, value string, acks string) {
+func handleProduce(brokerAddr string, topic string, partition uint32, value string, acks string) {
 	var ackLevel api.AckLevel
 	switch strings.ToLower(acks) {
 	case "none":
@@ -33,19 +33,19 @@ func handleProduce(initialBrokerAddr string, topic string, partition uint32, val
 		log.Fatalf("invalid acks level (none, all): %s", acks)
 	}
 
-	currentBrokerAddr := initialBrokerAddr
+	currentBrokerAddr := brokerAddr
 
 	for i := 0; i < 5; i++ {
 		log.Printf("attempting to produce to broker at %s", currentBrokerAddr)
 		conn, err := grpc.NewClient(currentBrokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
-			log.Printf("did not connect: %v", err)
+			log.Printf("failed to connect to %s: %v. retrying...", currentBrokerAddr, err)
+			time.Sleep(1 * time.Second)
+			continue
 		}
-		defer conn.Close()
 
 		client := api.NewKafkaClient(conn)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 
 		req := &api.ProduceRequest{
 			Topic:     topic,
@@ -55,8 +55,11 @@ func handleProduce(initialBrokerAddr string, topic string, partition uint32, val
 		}
 
 		resp, err := client.Produce(ctx, req)
+		conn.Close()
+		cancel()
+
 		if err != nil {
-			log.Fatalf("could not produce: %v", err)
+			log.Fatalf("could not produce: %v. retrying...", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}

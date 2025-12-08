@@ -9,6 +9,7 @@ service Kafka {
   rpc Consume(ConsumeRequest) returns (ConsumeResponse);
   rpc CommitOffset(CommitOffsetRequest) returns (CommitOffsetResponse);
   rpc FetchOffset(FetchOffsetRequest) returns (FetchOffsetResponse);
+  rpc Join(JoinRequest) returns (JoinResponse);
 }
 
 enum ErrorCode {
@@ -71,3 +72,11 @@ message FetchOffsetRequest {
 message FetchOffsetResponse {
     int64 offset = 1;
 }
+
+message JoinRequest {
+    string node_id = 1;
+    string raft_addr = 2;
+    string grpc_addr = 3;
+}
+
+message JoinResponse {}

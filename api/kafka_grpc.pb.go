@@ -23,6 +23,7 @@ const (
 	Kafka_Consume_FullMethodName      = "/api.Kafka/Consume"
 	Kafka_CommitOffset_FullMethodName = "/api.Kafka/CommitOffset"
 	Kafka_FetchOffset_FullMethodName  = "/api.Kafka/FetchOffset"
+	Kafka_Join_FullMethodName         = "/api.Kafka/Join"
 )
 
 // KafkaClient is the client API for Kafka service.
@@ -33,6 +34,7 @@ type KafkaClient interface {
 	Consume(ctx context.Context, in *ConsumeRequest, opts ...grpc.CallOption) (*ConsumeResponse, error)
 	CommitOffset(ctx context.Context, in *CommitOffsetRequest, opts ...grpc.CallOption) (*CommitOffsetResponse, error)
 	FetchOffset(ctx context.Context, in *FetchOffsetRequest, opts ...grpc.CallOption) (*FetchOffsetResponse, error)
+	Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error)
 }
 
 type kafkaClient struct {
@@ -83,6 +85,16 @@ func (c *kafkaClient) FetchOffset(ctx context.Context, in *FetchOffsetRequest, o
 	return out, nil
 }
 
+func (c *kafkaClient) Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JoinResponse)
+	err := c.cc.Invoke(ctx, Kafka_Join_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KafkaServer is the server API for Kafka service.
 // All implementations must embed UnimplementedKafkaServer
 // for forward compatibility.
@@ -91,6 +103,7 @@ type KafkaServer interface {
 	Consume(context.Context, *ConsumeRequest) (*ConsumeResponse, error)
 	CommitOffset(context.Context, *CommitOffsetRequest) (*CommitOffsetResponse, error)
 	FetchOffset(context.Context, *FetchOffsetRequest) (*FetchOffsetResponse, error)
+	Join(context.Context, *JoinRequest) (*JoinResponse, error)
 	mustEmbedUnimplementedKafkaServer()
 }
 
@@ -112,6 +125,9 @@ func (UnimplementedKafkaServer) CommitOffset(context.Context, *CommitOffsetReque
 }
 func (UnimplementedKafkaServer) FetchOffset(context.Context, *FetchOffsetRequest) (*FetchOffsetResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method FetchOffset not implemented")
+}
+func (UnimplementedKafkaServer) Join(context.Context, *JoinRequest) (*JoinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Join not implemented")
 }
 func (UnimplementedKafkaServer) mustEmbedUnimplementedKafkaServer() {}
 func (UnimplementedKafkaServer) testEmbeddedByValue()               {}
@@ -206,6 +222,24 @@ func _Kafka_FetchOffset_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Kafka_Join_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JoinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KafkaServer).Join(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Kafka_Join_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KafkaServer).Join(ctx, req.(*JoinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Kafka_ServiceDesc is the grpc.ServiceDesc for Kafka service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +262,10 @@ var Kafka_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FetchOffset",
 			Handler:    _Kafka_FetchOffset_Handler,
+		},
+		{
+			MethodName: "Join",
+			Handler:    _Kafka_Join_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
