@@ -1,9 +1,8 @@
-package main
+package broker
 
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"kafka-go/api"
 	"kafka-go/cluster"
@@ -26,6 +25,7 @@ import (
 // server implements the gRPC server for Kafka service.
 type server struct {
 	api.UnimplementedKafkaServer
+
 	dataDir string
 
 	// Manage commit logs
@@ -40,18 +40,47 @@ type server struct {
 	metadataMu sync.RWMutex
 	metadata   map[string]string // map of node IDs to their public gRPC addresses
 
+	coordinatorMu  sync.Mutex
+	consumerGroups map[string]*ConsumerGroup // map of group id to its metadata.
+
 	raft *raft.Raft
 }
 
-// newServer creates a new gRPC server instance.
-func newServer(dataDir string) (*server, error) {
+type ConsumerGroupState string
+
+type ConsumerGroup struct {
+	mu          sync.Mutex
+	GroupID     string
+	State       ConsumerGroupState
+	Members     map[string]*GroupMember // consumer_id -> its metadata
+	Assignments map[string][]uint32     // consumer_id -> partitions
+	Topic       string
+	Partitions  []uint32 // all available partition numbers for the topic
+
+	generationID int
+	joinTimer    *time.Timer
+	waitingJoin  map[string]chan *api.JoinGroupResponse
+	waitingSync  map[string]chan *api.SyncGroupResponse
+}
+
+// GroupMember represents a single consumer within a group.
+type GroupMember struct {
+	ConsumerID    string
+	LastHeartbeat time.Time
+}
+
+// NewServer creates a new gRPC server instance.
+func NewServer(dataDir string) (*server, error) {
 	srv := &server{
-		dataDir:    dataDir,
-		logs:       make(map[string]*storage.CommitLog),
-		offsets:    make(map[string]int64),
-		offsetPath: filepath.Join(dataDir, "offsets.json"),
-		metadata:   make(map[string]string),
+		dataDir:        dataDir,
+		logs:           make(map[string]*storage.CommitLog),
+		offsets:        make(map[string]int64),
+		offsetPath:     filepath.Join(dataDir, "offsets.json"),
+		metadata:       make(map[string]string),
+		consumerGroups: make(map[string]*ConsumerGroup),
 	}
+
+	go srv.heartbeatChecker()
 
 	// Load offsets from the durable file on startup
 	if err := srv.loadOffsets(); err != nil {
@@ -363,8 +392,8 @@ func (s *server) UpdateMetadata(nodeID, grpcAddr string) {
 	s.metadata[nodeID] = grpcAddr
 }
 
-// setupRaft initializes and returns a Raft instance.
-func setupRaft(nodeID, raftAddr, dataDir string, srv *server) (*raft.Raft, error) {
+// SetupRaft initializes and returns a Raft instance.
+func (s *server) SetupRaft(nodeID, raftAddr, dataDir string) error {
 	config := raft.DefaultConfig()
 	// Sets the unique identifier for this specific node within the Raft cluster.
 	// The nodeID is the string we passed in from the command-line flags (e.g., "node1").
@@ -375,7 +404,7 @@ func setupRaft(nodeID, raftAddr, dataDir string, srv *server) (*raft.Raft, error
 	// Ensure the provided network address is valid before trying to use it.
 	addr, err := resolveAdvertisableAddr(raftAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve advertiable address: %w", err)
+		return fmt.Errorf("failed to resolve advertiable address: %w", err)
 	}
 
 	// Creates the network layer that Raft nodes will use to communicate with each other.
@@ -384,12 +413,12 @@ func setupRaft(nodeID, raftAddr, dataDir string, srv *server) (*raft.Raft, error
 	// This transport handles all that low-level networking.
 	transport, err := raft.NewTCPTransport(raftAddr, addr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create raft transport: %w", err)
+		return fmt.Errorf("failed to create raft transport: %w", err)
 	}
 
 	snapshots, err := raft.NewFileSnapshotStore(dataDir, 2, os.Stderr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create snapshot store: %w", err)
+		return fmt.Errorf("failed to create snapshot store: %w", err)
 	}
 
 	// Creates the persistent storage for the Raft log.
@@ -398,23 +427,23 @@ func setupRaft(nodeID, raftAddr, dataDir string, srv *server) (*raft.Raft, error
 	// This file stores that log durably on disk.
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(dataDir, "raft.db"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create bolt store: %w", err)
+		return fmt.Errorf("failed to create bolt store: %w", err)
 	}
 
 	// Creates an instance of our custom Finite State Machine (FSM).
 	// The FSM is the bridge between Raft's log and our application's state (the CommitLog files).
-	fsm := cluster.NewFSM(srv)
+	fsm := cluster.NewFSM(s)
 
 	ra, err := raft.NewRaft(config, fsm, logStore, logStore, snapshots, transport)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create raft: %w", err)
+		return fmt.Errorf("failed to create raft: %w", err)
 	}
-
-	return ra, nil
+	s.raft = ra
+	return nil
 }
 
-// bootstrapCluster handles the logic of either starting a new cluster or joining an existing one.
-func bootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string, ra *raft.Raft) error {
+// BootstrapCluster handles the logic of either starting a new cluster or joining an existing one.
+func (s *server) BootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string) error {
 	bootstrap := joinAddr == ""
 	// bootstrap == true means we are going to start a new cluster.
 	if bootstrap {
@@ -427,14 +456,14 @@ func bootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string, ra *raft.Raft
 				},
 			},
 		}
-		bootstrapFuture := ra.BootstrapCluster(configuration)
+		bootstrapFuture := s.raft.BootstrapCluster(configuration)
 		if err := bootstrapFuture.Error(); err != nil {
 			return fmt.Errorf("failed to bootstrap cluster: %w", err)
 		}
 
 		log.Println("waiting for the node to become the leader...")
 		select {
-		case <-ra.LeaderCh():
+		case <-s.raft.LeaderCh():
 			log.Println("node has become the leader.")
 		case <-time.After(10 * time.Second):
 			return fmt.Errorf("timed out waiting for leadership")
@@ -457,7 +486,7 @@ func bootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string, ra *raft.Raft
 		if err != nil {
 			return err
 		}
-		applyFuture := ra.Apply(cmdBytes, 5*time.Second)
+		applyFuture := s.raft.Apply(cmdBytes, 5*time.Second)
 		if err := applyFuture.Error(); err != nil {
 			return fmt.Errorf("failed to apply initial metadata: %w", err)
 		}
@@ -504,65 +533,4 @@ func bootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string, ra *raft.Raft
 		}
 		log.Printf("failed to join cluster with address %s, retrying: %v", currentJoinAddr, err)
 	}
-}
-
-func main() {
-	nodeID := flag.String("id", "", "Node ID")
-	// grpcAddr is the main address that clients (producers or consumers) connect to.
-	grpcAddr := flag.String("grpc_addr", "127.0.0.1:9092", "Address for gRPC server")
-	// raftAddr is the address that the broker nodes use to talk each other for all internal Raft consensus business.
-	raftAddr := flag.String("raft_addr", "127.0.0.1:19902", "Address for Raft server")
-	// joinAddr is the address of another, already existing node in the cluster.
-	// A new node uses this address to find the existing cluster and ask to be added as a member.
-	joinAddr := flag.String("join_addr", "", "Address to join an existing Raft cluster")
-	dataDirRoot := flag.String("data_dir", "./data", "Directory for logs")
-	flag.Parse()
-
-	if *nodeID == "" {
-		log.Fatal("node id is required")
-	}
-
-	dataDir := filepath.Join(*dataDirRoot, *nodeID)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		log.Fatalf("failed to create data dir: %v", err)
-	}
-
-	// --- Start gRPC Server ---
-	lis, err := net.Listen("tcp", *grpcAddr)
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
-
-	grpcServer := grpc.NewServer()
-	srv, err := newServer(dataDir)
-	if err != nil {
-		log.Fatalf("failed to create server: %v", err)
-	}
-
-	api.RegisterKafkaServer(grpcServer, srv)
-
-	log.Printf("broker listening on %s", *grpcAddr)
-	go func() {
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("failed to serve: %v", err)
-		}
-	}()
-
-	// --- Setup Raft ---
-	log.Println("start setting up raft...")
-	ra, err := setupRaft(*nodeID, *raftAddr, dataDir, srv)
-	if err != nil {
-		log.Fatalf("failed to setup raft: %v", err)
-	}
-	srv.raft = ra
-	log.Println("finish setting up raft!")
-
-	// --- Cluster Bootstrapping ---
-	log.Println("starting cluster bootstrap/join process...")
-	if err := bootstrapCluster(*nodeID, *raftAddr, *grpcAddr, *joinAddr, ra); err != nil {
-		log.Fatalf("failed to bootstrap or join cluster: %v", err)
-	}
-
-	// Block forever
-	select {}
 }

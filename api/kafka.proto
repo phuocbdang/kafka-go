@@ -10,11 +10,16 @@ service Kafka {
   rpc CommitOffset(CommitOffsetRequest) returns (CommitOffsetResponse);
   rpc FetchOffset(FetchOffsetRequest) returns (FetchOffsetResponse);
   rpc Join(JoinRequest) returns (JoinResponse);
+  rpc JoinGroup(JoinGroupRequest) returns (JoinGroupResponse);
+  rpc SyncGroup(SyncGroupRequest) returns (SyncGroupResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
 enum ErrorCode {
   OK = 0;
   NOT_LEADER = 1;
+  REBALANCE_IN_PROGRESS = 2;
+  UNKNOWN_MEMBER_ID = 3;
 }
 
 enum AckLevel {
@@ -80,3 +85,50 @@ message JoinRequest {
 }
 
 message JoinResponse {}
+
+message JoinGroupRequest {
+    string group_id = 1;
+    string consumer_id = 2; // A unique ID for this consumer instance
+    string topic = 3;
+}
+
+message TopicMetadata {}
+
+message JoinGroupResponse {
+    ErrorCode error_code = 1;
+    string leader_id = 2; // The consumer_id of the elected group leader
+    bool is_leader = 3;
+    // The following fields are ONLY sent to the group leader.
+    // These are all the information consumer leader needs to create an assignment plan.
+    map<string, TopicMetadata> members = 4; // map consumer id to its metadata
+    repeated uint32 partitions = 5;
+}
+
+message PartitionAssignment {
+  repeated uint32 partitions = 1;
+}
+
+// Consumer leader sends this request to coordination after it figured out the partition assignment
+message SyncGroupRequest {
+    string group_id = 1;
+    string consumer_id = 2;
+    // The leader sends the full assignment. Followers send an empty map.
+    map<string, PartitionAssignment> assignments = 3;
+    // e.g. {"consumer-A": [0, 1], "consumer-B": [2, 3]}
+}
+
+// The coordinator uses this to send each consumer its specific piece of the assignment plan.
+message SyncGroupResponse {
+    ErrorCode error_code = 1;
+    PartitionAssignment assignment = 2;
+}
+
+// The consumer sends this to the coordinator every few seconds to prevent its session from timing out.
+message HeartbeatRequest {
+    string group_id = 1;
+    string consumer_id = 2;
+}
+
+message HeartbeatResponse {
+    ErrorCode error_code = 1;
+}
