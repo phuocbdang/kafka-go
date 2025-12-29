@@ -43,6 +43,9 @@ type server struct {
 	coordinatorMu  sync.Mutex
 	consumerGroups map[string]*ConsumerGroup // map of group id to its metadata.
 
+	topicMu       sync.RWMutex
+	topicMetadata map[string]TopicMetadata // map of topic name to its metadata.
+
 	raft *raft.Raft
 }
 
@@ -69,6 +72,11 @@ type GroupMember struct {
 	LastHeartbeat time.Time
 }
 
+// TopicMetadata holds the metadata for a single topic.
+type TopicMetadata struct {
+	Partitions uint32
+}
+
 // NewServer creates a new gRPC server instance.
 func NewServer(dataDir string) (*server, error) {
 	srv := &server{
@@ -78,6 +86,7 @@ func NewServer(dataDir string) (*server, error) {
 		offsetPath:     filepath.Join(dataDir, "offsets.json"),
 		metadata:       make(map[string]string),
 		consumerGroups: make(map[string]*ConsumerGroup),
+		topicMetadata:  make(map[string]TopicMetadata),
 	}
 
 	go srv.heartbeatChecker()
@@ -381,6 +390,14 @@ func resolveAdvertisableAddr(addr string) (net.Addr, error) {
 	}
 
 	return tcpAddr, nil
+}
+
+// CreateTopicMetadata is called by the FSM to update the server's in-memory metadata map.
+func (s *server) CreateTopicMetadata(topic string, partitions uint32) {
+	s.topicMu.Lock()
+	defer s.topicMu.Unlock()
+	s.topicMetadata[topic] = TopicMetadata{Partitions: partitions}
+	log.Printf("replicated metadata for new topic: %s with %d partitions", topic, partitions)
 }
 
 // UpdateMetadata is called by the FSM to update the server's in-memory metadata map.

@@ -27,6 +27,7 @@ const (
 	Kafka_JoinGroup_FullMethodName    = "/api.Kafka/JoinGroup"
 	Kafka_SyncGroup_FullMethodName    = "/api.Kafka/SyncGroup"
 	Kafka_Heartbeat_FullMethodName    = "/api.Kafka/Heartbeat"
+	Kafka_CreateTopic_FullMethodName  = "/api.Kafka/CreateTopic"
 )
 
 // KafkaClient is the client API for Kafka service.
@@ -41,6 +42,7 @@ type KafkaClient interface {
 	JoinGroup(ctx context.Context, in *JoinGroupRequest, opts ...grpc.CallOption) (*JoinGroupResponse, error)
 	SyncGroup(ctx context.Context, in *SyncGroupRequest, opts ...grpc.CallOption) (*SyncGroupResponse, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error)
 }
 
 type kafkaClient struct {
@@ -131,6 +133,16 @@ func (c *kafkaClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts 
 	return out, nil
 }
 
+func (c *kafkaClient) CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTopicResponse)
+	err := c.cc.Invoke(ctx, Kafka_CreateTopic_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KafkaServer is the server API for Kafka service.
 // All implementations must embed UnimplementedKafkaServer
 // for forward compatibility.
@@ -143,6 +155,7 @@ type KafkaServer interface {
 	JoinGroup(context.Context, *JoinGroupRequest) (*JoinGroupResponse, error)
 	SyncGroup(context.Context, *SyncGroupRequest) (*SyncGroupResponse, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error)
 	mustEmbedUnimplementedKafkaServer()
 }
 
@@ -176,6 +189,9 @@ func (UnimplementedKafkaServer) SyncGroup(context.Context, *SyncGroupRequest) (*
 }
 func (UnimplementedKafkaServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedKafkaServer) CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateTopic not implemented")
 }
 func (UnimplementedKafkaServer) mustEmbedUnimplementedKafkaServer() {}
 func (UnimplementedKafkaServer) testEmbeddedByValue()               {}
@@ -342,6 +358,24 @@ func _Kafka_Heartbeat_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Kafka_CreateTopic_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTopicRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KafkaServer).CreateTopic(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Kafka_CreateTopic_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KafkaServer).CreateTopic(ctx, req.(*CreateTopicRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Kafka_ServiceDesc is the grpc.ServiceDesc for Kafka service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -380,6 +414,10 @@ var Kafka_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _Kafka_Heartbeat_Handler,
+		},
+		{
+			MethodName: "CreateTopic",
+			Handler:    _Kafka_CreateTopic_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
