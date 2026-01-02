@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 // commitLogState holds the durable state for a commit log.
@@ -14,14 +16,22 @@ type commitLogState struct {
 	ProducerLastSequence map[uint64]int64 `json:"producer_last_sequence"`
 }
 
-// Each record is prefixed with an 8-byte integer indicating its length.
-const LEN_WIDTH = 8
+const (
+	// Each record is prefixed with an 8-byte integer indicating its length.
+	lenWidth = 8
+	// Initial mmap size (1 MB)
+	initialMmapSize = 1 << 20
+	// Maximum mmap size (1 GB)
+	maxMmapSize = 1 << 30
+)
 
 // CommitLog represents an append-only log file on disk
 type CommitLog struct {
 	mu        sync.RWMutex
 	file      *os.File
 	size      int64
+	mmapData  []byte
+	mmapSize  int64
 	state     commitLogState
 	statePath string
 }
@@ -29,13 +39,14 @@ type CommitLog struct {
 // NewCommitLog creates or opens a commit log file.
 func NewCommitLog(path string) (*CommitLog, error) {
 	permissions := os.FileMode(0666)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, permissions)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, permissions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open commit log file: %w", err)
 	}
 
 	fi, err := f.Stat()
 	if err != nil {
+		f.Close()
 		return nil, fmt.Errorf("failed to get file info: %w", err)
 	}
 
@@ -45,12 +56,87 @@ func NewCommitLog(path string) (*CommitLog, error) {
 		statePath: path + ".state",
 	}
 
+	// Initialize mmap
+	if err := commitLog.initMmap(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to initialize mmap: %w", err)
+	}
+
 	// Load the persisted state from disk.
 	if err := commitLog.loadState(); err != nil {
+		commitLog.Close()
 		return nil, fmt.Errorf("failed to load commit log state: %w", err)
 	}
 
 	return commitLog, nil
+}
+
+// initMmap initializes the memory-mapped region for the file.
+func (c *CommitLog) initMmap() error {
+	// Determine the size to mmap
+	mmapSize := int64(initialMmapSize)
+	if c.size > 0 {
+		// Round up to the nearest power of 2
+		for mmapSize < c.size && mmapSize < maxMmapSize {
+			mmapSize *= 2
+		}
+	}
+
+	// Ensure the file is at least mmapSize
+	if err := c.file.Truncate(mmapSize); err != nil {
+		return fmt.Errorf("failed to truncate file: %w", err)
+	}
+
+	// Memory map the file
+	data, err := unix.Mmap(int(c.file.Fd()), 0, int(mmapSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return fmt.Errorf("failed to mmap file: %w", err)
+	}
+
+	c.mmapData = data
+	c.mmapSize = mmapSize
+	return nil
+}
+
+// remapIfNeeded grows the mmap region if necessary.
+func (c *CommitLog) remapIfNeeded(requiredSize int64) error {
+	if requiredSize <= c.mmapSize {
+		return nil
+	}
+
+	// Unmap the current region
+	if err := unix.Munmap(c.mmapData); err != nil {
+		return fmt.Errorf("failed to unmap: %w", err)
+	}
+
+	// Calculate new size (double until it fits)
+	newSize := c.mmapSize * 2
+	for newSize < requiredSize && newSize < maxMmapSize {
+		newSize *= 2
+	}
+
+	if newSize > maxMmapSize {
+		newSize = maxMmapSize
+	}
+
+	if requiredSize > newSize {
+		return fmt.Errorf("required size exceeds maximum mmap size")
+	}
+
+	// Grow the file
+	if err := c.file.Truncate(newSize); err != nil {
+		return fmt.Errorf("failed to truncate file: %w", err)
+	}
+
+	// Remap with new size
+	data, err := unix.Mmap(int(c.file.Fd()), 0, int(newSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return fmt.Errorf("failed to remap file: %w", err)
+	}
+
+	c.mmapData = data
+	c.mmapSize = newSize
+	return nil
 }
 
 // loadState reads the .state file from disk.
@@ -92,21 +178,22 @@ func (c *CommitLog) AppendIdempotent(producerID uint64, sequenceNumber int64, da
 	}
 
 	pos := c.size
+	recordSize := int64(lenWidth + len(data))
+	newSize := c.size + recordSize
 
-	// Write the length of the data as an 8-byte header
-	lenBuf := make([]byte, LEN_WIDTH)
-	binary.BigEndian.PutUint64(lenBuf, uint64((len(data))))
-	if _, err := c.file.Write(lenBuf); err != nil {
-		return 0, fmt.Errorf("failed to write record length: %w", err)
+	// Ensure mmap region is large enough
+	if err := c.remapIfNeeded(newSize); err != nil {
+		return 0, fmt.Errorf("failed to remap: %w", err)
 	}
 
-	// Write the actual data
-	if _, err := c.file.Write(data); err != nil {
-		return 0, fmt.Errorf("failed to write record data: %w", err)
-	}
+	// Write the length of the data as an 8-byte header directly to mmap
+	binary.BigEndian.PutUint64(c.mmapData[pos:pos+lenWidth], uint64(len(data)))
+
+	// Write the actual data to mmap
+	copy(c.mmapData[pos+lenWidth:pos+recordSize], data)
 
 	// Update the in-memory size of the log
-	c.size += int64(LEN_WIDTH + len(data))
+	c.size = newSize
 
 	return pos, nil
 }
@@ -117,49 +204,43 @@ func (c *CommitLog) Append(data []byte) (offset int64, err error) {
 	defer c.mu.Unlock()
 
 	pos := c.size
+	recordSize := int64(lenWidth + len(data))
+	newSize := c.size + recordSize
 
-	// Write the length of the data as an 8-byte header
-	lenBuf := make([]byte, LEN_WIDTH)
-	binary.BigEndian.PutUint64(lenBuf, uint64((len(data))))
-	if _, err := c.file.Write(lenBuf); err != nil {
-		return 0, fmt.Errorf("failed to write record length: %w", err)
+	// Ensure mmap region is large enough
+	if err := c.remapIfNeeded(newSize); err != nil {
+		return 0, fmt.Errorf("failed to remap: %w", err)
 	}
 
-	// Write the actual data
-	if _, err := c.file.Write(data); err != nil {
-		return 0, fmt.Errorf("failed to write record data: %w", err)
-	}
+	// Write the length of the data as an 8-byte header directly to mmap
+	binary.BigEndian.PutUint64(c.mmapData[pos:pos+lenWidth], uint64(len(data)))
+
+	// Write the actual data to mmap
+	copy(c.mmapData[pos+lenWidth:pos+recordSize], data)
 
 	// Update the in-memory size of the log
-	c.size += int64(LEN_WIDTH + len(data))
+	c.size = newSize
 
 	return pos, nil
 }
 
 // Read retrieves a record from a specific offset in the log.
 func (c *CommitLog) Read(offset int64) ([]byte, int64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	if offset >= c.size {
 		return nil, 0, fmt.Errorf("offset out of bounds")
 	}
 
-	// Read the length prefix
-	lenBuf := make([]byte, LEN_WIDTH)
-	if _, err := c.file.ReadAt(lenBuf, offset); err != nil {
-		return nil, 0, fmt.Errorf("failed to read record length: %w", err)
-	}
+	// Read the length prefix from mmap
+	recordLen := binary.BigEndian.Uint64(c.mmapData[offset : offset+lenWidth])
 
-	recordLen := binary.BigEndian.Uint64(lenBuf)
-
-	// Read the record data
+	// Read the record data from mmap
 	data := make([]byte, recordLen)
-	if _, err := c.file.ReadAt(data, offset+LEN_WIDTH); err != nil {
-		return nil, 0, fmt.Errorf("failed to read record data: %w", err)
-	}
+	copy(data, c.mmapData[offset+lenWidth:offset+lenWidth+int64(recordLen)])
 
-	nextOffset := offset + int64(LEN_WIDTH) + int64(recordLen)
+	nextOffset := offset + int64(lenWidth) + int64(recordLen)
 
 	return data, nextOffset, nil
 }
@@ -168,12 +249,26 @@ func (c *CommitLog) Read(offset int64) ([]byte, int64, error) {
 func (c *CommitLog) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.file.Close()
-}
 
-// Name returns the file name of the log.
-func (c *CommitLog) Name() string {
-	return c.file.Name()
+	// Sync mmap to disk before unmapping
+	if c.mmapData != nil {
+		if err := unix.Msync(c.mmapData, unix.MS_SYNC); err != nil {
+			return fmt.Errorf("failed to sync mmap: %w", err)
+		}
+
+		// Unmap the memory
+		if err := unix.Munmap(c.mmapData); err != nil {
+			return fmt.Errorf("failed to unmap: %w", err)
+		}
+		c.mmapData = nil
+	}
+
+	// Truncate the file to actual size
+	if err := c.file.Truncate(c.size); err != nil {
+		return fmt.Errorf("failed to truncate file to size: %w", err)
+	}
+
+	return c.file.Close()
 }
 
 func (c *CommitLog) GetLastAppliedIndex() uint64 {
