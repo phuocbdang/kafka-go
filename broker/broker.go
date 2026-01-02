@@ -195,9 +195,11 @@ func (s *server) Produce(ctx context.Context, req *api.ProduceRequest) (*api.Pro
 	}
 
 	payload := cluster.ProduceCommandPayload{
-		Topic:     req.Topic,
-		Partition: req.Partition,
-		Value:     req.Value,
+		Topic:          req.Topic,
+		Partition:      req.Partition,
+		Value:          req.Value,
+		ProducerID:     req.ProducerId,
+		SequenceNumber: req.SequenceNumber,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {

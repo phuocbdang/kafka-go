@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"kafka-go/api"
 	"log"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -82,6 +84,11 @@ func handleProduce(brokerAddrs string, topic string, partition uint32, value str
 		log.Fatalf("invalid acks level (none, all): %s", acks)
 	}
 
+	state.mu.Lock()
+	state.sequenceNumber++
+	currentSequence := state.sequenceNumber
+	state.mu.Unlock()
+
 	bootstrapServers := strings.Split(brokerAddrs, ",")
 	if len(bootstrapServers) == 0 || bootstrapServers[0] == "" {
 		log.Fatal("no bootstrap servers provided")
@@ -91,7 +98,7 @@ func handleProduce(brokerAddrs string, topic string, partition uint32, value str
 	serverIndex := 0
 
 	for range 10 {
-		log.Printf("attempting to produce to broker at %s", currentBrokerAddr)
+		log.Printf("attempting to produce to broker at %s (seq: %d)", currentBrokerAddr, currentSequence)
 
 		conn, err := grpc.NewClient(currentBrokerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -106,10 +113,12 @@ func handleProduce(brokerAddrs string, topic string, partition uint32, value str
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		req := &api.ProduceRequest{
-			Topic:     topic,
-			Partition: uint32(partition),
-			Value:     []byte(value),
-			Ack:       ackLevel,
+			Topic:          topic,
+			Partition:      uint32(partition),
+			Value:          []byte(value),
+			Ack:            ackLevel,
+			ProducerId:     state.producerID,
+			SequenceNumber: currentSequence,
 		}
 
 		resp, err := client.Produce(ctx, req)
@@ -406,7 +415,25 @@ func (c *Consumer) consumePartition(ctx context.Context, partition uint32, wg *s
 	}
 }
 
+type producerState struct {
+	mu             sync.Mutex
+	producerID     uint64
+	sequenceNumber int64
+}
+
+var state producerState
+
 func main() {
+	pid, err := rand.Int(rand.Reader, new(big.Int).SetUint64(^uint64(0)))
+	if err != nil {
+		log.Fatalf("failed to generate producer ID: %v", err)
+	}
+	state = producerState{
+		producerID:     pid.Uint64(),
+		sequenceNumber: 0,
+	}
+	log.Printf("client started with Producer ID: %d", state.producerID)
+
 	if len(os.Args) < 2 {
 		printUsage()
 		return
