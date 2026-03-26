@@ -238,7 +238,7 @@ Open three terminal windows.
 ```bash
 go run ./cmd \
   -id node1 \
-  -grpc_addr 127.0.0.1:9092 \
+  -grpc_addr 127.0.0.1:9091 \
   -raft_addr 127.0.0.1:19901 \
   -data_dir ./data
 ```
@@ -247,9 +247,9 @@ go run ./cmd \
 ```bash
 go run ./cmd \
   -id node2 \
-  -grpc_addr 127.0.0.1:9093 \
+  -grpc_addr 127.0.0.1:9092 \
   -raft_addr 127.0.0.1:19902 \
-  -join_addr 127.0.0.1:9092 \
+  -join_addr 127.0.0.1:9091 \
   -data_dir ./data
 ```
 
@@ -257,9 +257,29 @@ go run ./cmd \
 ```bash
 go run ./cmd \
   -id node3 \
-  -grpc_addr 127.0.0.1:9094 \
+  -grpc_addr 127.0.0.1:9093 \
   -raft_addr 127.0.0.1:19903 \
   -join_addr 127.0.0.1:9092 \
+  -data_dir ./data
+```
+
+**Terminal 4 — Start Node 4 (joins via node1 or node2 or node3):**
+```bash
+go run ./cmd \
+  -id node4 \
+  -grpc_addr 127.0.0.1:9094 \
+  -raft_addr 127.0.0.1:19904 \
+  -join_addr 127.0.0.1:9091 \
+  -data_dir ./data
+```
+
+**Terminal 5 — Start Node 5:**
+```bash
+go run ./cmd \
+  -id node5 \
+  -grpc_addr 127.0.0.1:9095 \
+  -raft_addr 127.0.0.1:19905 \
+  -join_addr 127.0.0.1:9091 \
   -data_dir ./data
 ```
 
@@ -280,20 +300,20 @@ go run ./cmd \
 ```bash
 # Create a topic with 3 partitions
 go run ./client create-topic \
-  --bootstrap-server 127.0.0.1:9092 \
+  --bootstrap-server 127.0.0.1:9091 \
   --topic orders \
   --partitions 3
 
 # Produce a message to partition 0
 go run ./client produce \
-  --bootstrap-server 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 \
+  --bootstrap-server 127.0.0.1:9091,127.0.0.1:9092,127.0.0.1:9093 \
   --topic orders \
   --acks all \
   0 "order-id-123"
 
 # Consume from a group (run multiple instances to trigger rebalancing)
 go run ./client consume \
-  --bootstrap-server 127.0.0.1:9092 \
+  --bootstrap-server 127.0.0.1:9091 \
   --topic orders \
   --group my-consumer-group
 ```

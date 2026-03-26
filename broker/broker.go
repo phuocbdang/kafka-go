@@ -46,7 +46,9 @@ type server struct {
 	topicMu       sync.RWMutex
 	topicMetadata map[string]TopicMetadata // map of topic name to its metadata.
 
-	raft *raft.Raft
+	raft          *raft.Raft
+	raftLogStore  *raftboltdb.BoltStore
+	raftSnapStore raft.SnapshotStore
 }
 
 type ConsumerGroupState string
@@ -423,7 +425,7 @@ func (s *server) SetupRaft(nodeID, raftAddr, dataDir string) error {
 	// Ensure the provided network address is valid before trying to use it.
 	addr, err := resolveAdvertisableAddr(raftAddr)
 	if err != nil {
-		return fmt.Errorf("failed to resolve advertiable address: %w", err)
+		return fmt.Errorf("failed to resolve advertiser address: %w", err)
 	}
 
 	// Creates the network layer that Raft nodes will use to communicate with each other.
@@ -458,11 +460,33 @@ func (s *server) SetupRaft(nodeID, raftAddr, dataDir string) error {
 		return fmt.Errorf("failed to create raft: %w", err)
 	}
 	s.raft = ra
+	s.raftLogStore = logStore
+	s.raftSnapStore = snapshots
 	return nil
 }
 
+// hasExistingRaftState checks if this node has previously joined a cluster
+// by checking for actual committed log entries or snapshots in the Raft stores.
+func hasExistingRaftState(logStore raft.LogStore, stableStore raft.StableStore, snapshotStore raft.SnapshotStore) (bool, error) {
+	return raft.HasExistingState(logStore, stableStore, snapshotStore)
+}
+
 // BootstrapCluster handles the logic of either starting a new cluster or joining an existing one.
+// On restart, if raft.db already exists, Raft will automatically reconnect to the cluster
+// using the persisted cluster configuration — no bootstrap or join RPC needed.
 func (s *server) BootstrapCluster(nodeID, raftAddr, grpcAddr, joinAddr string) error {
+	// If this node already has Raft state on disk, it was previously part of a cluster.
+	// Raft will reconnect automatically — calling Bootstrap or Join again is unnecessary
+	// and would cause errors (ErrCantBootstrap) or duplicate voter entries.
+	hasState, err := hasExistingRaftState(s.raftLogStore, s.raftLogStore, s.raftSnapStore)
+	if err != nil {
+		return fmt.Errorf("failed to check raft state: %w", err)
+	}
+	if hasState {
+		log.Println("existing raft state found — skipping bootstrap/join, raft will reconnect automatically")
+		return nil
+	}
+
 	bootstrap := joinAddr == ""
 	// bootstrap == true means we are going to start a new cluster.
 	if bootstrap {
